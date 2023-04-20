@@ -1,7 +1,7 @@
 package main
 
 import (
-	"encoding/gob"
+	"encoding/json"
 	"io"
 	"log"
 	"os"
@@ -110,7 +110,7 @@ func (s *URLStore) load(filename string) error {
 	}
 	defer f.Close()
 	// 从文件中读取数据
-	d := gob.NewDecoder(f)
+	d := json.NewDecoder(f)
 	// 解码是一个无限循环，只要没有错误就会一直继续下去
 	for err == nil {
 		var r record
@@ -133,7 +133,7 @@ func (s *URLStore) saveLoop(filename string) {
 		log.Println("Error opening URLStore:", err)
 	}
 	defer f.Close()
-	e := gob.NewEncoder(f)
+	e := json.NewEncoder(f)
 	for {
 		r := <-s.save
 		if err := e.Encode(r); err != nil {

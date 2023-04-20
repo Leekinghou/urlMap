@@ -25,11 +25,11 @@ const AddForm = `
 
 var (
 	listenAddr = flag.String("http", ":8080", "http listen address")
-	dataFile   = flag.String("file", "file/store.gob", "data store file name")
+	dataFile   = flag.String("file", "file/store.json", "data store file name")
 	hostname   = flag.String("host", "localhost:8080", "http host name")
 )
 
-var store = NewURLStore("file/store.gob")
+var store *URLStore
 
 func main() {
 	//  flags 被解析后实例化 URLStore 对象
@@ -37,7 +37,7 @@ func main() {
 	store = NewURLStore(*dataFile)
 	http.HandleFunc("/", Redirect)
 	http.HandleFunc("/add", Add)
-	http.ListenAndServe(":8080", nil)
+	http.ListenAndServe(*listenAddr, nil)
 }
 
 func Redirect(w http.ResponseWriter, r *http.Request) {
