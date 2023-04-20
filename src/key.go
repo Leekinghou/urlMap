@@ -8,7 +8,9 @@ func genKey(n int) string {
 	}
 	l := len(keyChar)
 	// make中参数意义：make([]T, len, cap)
-	s := make([]byte, 0, n)
+	//s := make([]byte, 0, n)
+	// FIXME: will overflow. eventually.
+	s := make([]byte, 20)
 	i := len(s)
 	for n > 0 && i >= 0 {
 		i--
