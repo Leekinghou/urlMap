@@ -2,11 +2,24 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
+	"net/rpc"
 	"os"
 	"sync"
 )
+
+/**
+* 所有的从服务器都使用 ProxyStore
+* 主服务器使用 URLStore
+* 但创建方法相似： 都实现了使用相同签名的 Get 和 Put 方法
+* 所以我们能定义一个接口 Store 来归纳它们的行为
+* */
+type Store interface {
+	Put(url, key *string) error
+	Get(key, url *string) error
+}
 
 // URLStore 是一个存储短网址和长网址的映射的结构体
 type URLStore struct {
@@ -20,6 +33,12 @@ type record struct {
 	Key, URL string
 }
 
+// ProxyStore 用于 RPC 服务的 URLStore，我们可以构建另一种类型来代表 RPC 客户端，并将发送请求到 RPC 服务器端
+type ProxyStore struct {
+	urls   *URLStore
+	client *rpc.Client
+}
+
 // saveQueueLength 保存队列的长度
 const saveQueueLength = 1000
 
@@ -30,36 +49,41 @@ NewURLStore URLStore 工厂函数，返回一个新的 URLStore
 NewURLStore 返回一个新的 URLStore
 */
 func NewURLStore(filename string) *URLStore {
-	s := &URLStore{
-		urls: make(map[string]string),
-		// 保存队列:弥补性能瓶颈，Put将一个record发送到channel缓冲区保存，而非进行函数调用保存每一条记录到磁盘
-		save: make(chan record, saveQueueLength),
+	s := &URLStore{urls: make(map[string]string)}
+	// 获得一个空的 filename 时不去尝试写入或读取磁盘
+	if filename != "" {
+		s.save = make(chan record, saveQueueLength)
+		if err := s.load(filename); err != nil {
+			log.Println("Error opening URLStore:", err)
+		}
+		go s.saveLoop(filename)
 	}
-	if err := s.load(filename); err != nil {
-		log.Println("Error opening URLStore:", err)
-	}
-	go s.saveLoop(filename)
 	return s
 }
 
 // Get 从 URLStore 中获取一个长网址
-func (s *URLStore) Get(shortURL string) string {
+// 因为 key 和 url 是指针，必须在它们前面添加一个 * 来获取它们的值，就像 *key；u 是一个值，我们可以将它分配给指针，这样： *url = u
+func (s *URLStore) Get(key, url *string) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.urls[shortURL]
+	if u, ok := s.urls[*key]; ok {
+		*url = u
+		return nil
+	}
+	return errors.New("key not found")
 }
 
 // Set 将一个长网址和一个短网址存储到 URLStore 中
 // (s *URLStore)的作用是为了让Set方法可以访问URLStore的属性
-func (s *URLStore) Set(shortURL, longURL string) bool {
+func (s *URLStore) Set(shortURL, longURL *string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// 如果短网址已经存在，返回 false
-	if _, present := s.urls[shortURL]; present {
-		return false
+	if _, present := s.urls[*shortURL]; present {
+		return errors.New("shortURL already exists")
 	}
-	s.urls[shortURL] = longURL
-	return true
+	s.urls[*shortURL] = *longURL
+	return nil
 }
 
 // Delete 从 URLStore 中删除一个短网址
@@ -88,20 +112,21 @@ func (s *URLStore) All() map[string]string {
 }
 
 // Put 将一个长网址存储到 URLStore 中，并返回一个短网址
-func (s *URLStore) Put(url string) string {
+func (s *URLStore) Put(url, key *string) error {
 	for {
 		// 生成短链接
-		key := genKey(s.Count())
-		if ok := s.Set(key, url); ok {
-			s.save <- record{key, url}
-			return key
+		*key = genKey(s.Count())
+		if err := s.Set(key, url); err == nil {
+			break
 		}
-		// 程序不会走到这里
-		panic("shouldn't get here")
+		if s.save != nil {
+			s.save <- record{*key, *url}
+		}
 	}
+	return nil
 }
 
-// load:在 goto 启动的时候，我们磁盘上的数据存储必须读取到 URLStore 中
+// load:在项目启动的时候，我们磁盘上的数据存储必须读取到 URLStore 中
 func (s *URLStore) load(filename string) error {
 	f, err := os.Open(filename)
 	if err != nil {
@@ -115,7 +140,7 @@ func (s *URLStore) load(filename string) error {
 	for err == nil {
 		var r record
 		if err = d.Decode(&r); err == nil {
-			s.Set(r.Key, r.URL)
+			s.Set(&r.Key, &r.URL)
 		}
 	}
 	if err == io.EOF {
@@ -140,4 +165,37 @@ func (s *URLStore) saveLoop(filename string) {
 			log.Println("Error saving URL:", err)
 		}
 	}
+}
+
+func NewProxyStore(addr string) *ProxyStore {
+	client, err := rpc.DialHTTP("tcp", addr)
+	if err != nil {
+		log.Println("Error constructing ProxyStore: ", err)
+	}
+	return &ProxyStore{urls: NewURLStore(""), client: client}
+}
+
+// Get 可以在 RPC 客户端调用这些Get将请求直接传递给 RPC 服务器端
+func (s *ProxyStore) Get(key, url *string) error {
+	// 首先检查缓存中是否有 key
+	if err := s.urls.Get(key, url); err == nil {
+		return nil
+	}
+	// 如果没有找到，就从远程服务器获取
+	if err := s.client.Call("Store.Get", key, url); err != nil {
+		return err
+	}
+	// 将远程服务器的数据保存到本地
+	s.urls.Set(key, url)
+	return nil
+}
+
+func (s *ProxyStore) Put(url, key *string) error {
+	// rpc call to master
+	if err := s.client.Call("Store.Put", url, key); err != nil {
+		return err
+	}
+	// rpc update local cache
+	s.urls.Set(key, url)
+	return nil
 }

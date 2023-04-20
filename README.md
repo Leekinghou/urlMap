@@ -34,6 +34,34 @@ Web Project 在实际生产环境运行时会接收到很多短地址请求，�
 ### 1.4 version 4.0项目功能
 使用json存储
 
+### 1.5 version 5.0项目功能
+目前为止， `urlMap`作为单个进程运行，即使使用协程，在一台机器上运行的单个进程也只能提供这么多并发请求。
+
+一个 `URL`缩短服务通常更多的是重定向（使用 `Get()` 读取），而不是添加（使用 `Put` 写入）。
+因此，我们可以创建任意数量的只读从服务器用于缓存 `Get` 请求，并将 `Puts` 传递给主服务器，就像下面这个示例图：
+
+![](https://image-20220620.oss-cn-guangzhou.aliyuncs.com/image/20230420170522.png)
+多个从服务器进程要运行一个网络中另一台计算上的 `urlMap`应用的主实例，它们必须能够互相通信。
+Go 的 `rpc` 包提供了一个通过网络连接进行函数调用的便利的方法，使` URLStore `成为一个` RPC 服务`，这些从服务器进程将处理 `Get` 请求去提供长 `urls` 。
+当一个新的长` url `需要转换成一个短` url `（使用` Put() `方法）的时候，它们通过` rpc `连接将任务委托给主服务器进程；所以必须只有主服务器可以写入数据。
+
+到目前为止， URLStore 的 Get() 与 Put() 方法都有签名：
+```go
+func (s *URLStore) Get(key string) string
+
+func (s *URLStore) Put(url string) string
+```
+RPC 只能通过这种形式（t 是 T 类型的值）的方法工作：
+```go
+func (t T) Name(args *ArgType, reply *ReplyType) error
+```
+为了使 URLStore 成为一个 RPC 服务，我们需要去修改 Put 与 Get 方法，以便它们匹配这个函数的签名。这是结果：
+```go
+func (s *URLStore) Get(key, url *string) error
+
+func (s *URLStore) Put(url, key *string) error
+```
+
 ## 2. 项目结构
 ```
 ├── README.md
@@ -43,5 +71,17 @@ Web Project 在实际生产环境运行时会接收到很多短地址请求，�
 │   ├── key.go // 定义了key的生成函数
 ├── file 
     ├── store.gob // 存储数据的文件
+    ├── store.json 
 ```
 ![](https://image-20220620.oss-cn-guangzhou.aliyuncs.com/image/20230419171551.png)
+
+## 3. 改进  
+- 美观： 用户界面可以更漂亮。你可以使用 Go 的 template 包实现
+
+- 可靠性： 主 / 从 RPC 连接可以更可靠： 如果 客户端-服务器端 断开连接，客户端应该尝试重新拨号。一个 「拨号」 协程可以解决这个问题。
+
+- 资源耗尽： 随着 URL 数据库的增长，内存使用可能成为一个问题。可以通过主服务器上 key 的分割（分片）来解决。
+
+- 删除： 为了支持删除已经缩短的 URLs ， 主从服务器之间的交互将会变得更加复杂
+
+- 日志： 添加日志记录，以便在出现问题时进行调试
