@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"net/rpc"
 )
@@ -66,6 +67,7 @@ func Redirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, url, http.StatusFound)
+	log.Printf("Redirect: %s -> %s", key, url)
 }
 
 func Add(w http.ResponseWriter, r *http.Request) {
@@ -81,4 +83,5 @@ func Add(w http.ResponseWriter, r *http.Request) {
 	}
 	// 将 localhost:8080 替换成 *hostname
 	fmt.Fprintf(w, "http://%s/%s", *hostname, key)
+	log.Printf("Add: %s -> %s", key, url)
 }
